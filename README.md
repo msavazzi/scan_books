@@ -31,3 +31,5 @@ It logs detailed debug information and saves HTML/JSON previews for every query.
 ```bash
 git clone https://github.com/yourusername/book-metadata-scanner.git
 cd book-metadata-scanner
+
+2. Add your own Google API
