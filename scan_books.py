@@ -1,101 +1,121 @@
-import requests
-import openpyxl
-import re
-import time
-from bs4 import BeautifulSoup
-from urllib.parse import quote_plus
-import sys
-import json
-import hashlib
+import argparse
 import os
+import re
+import sys
+import time
+import requests
+from bs4 import BeautifulSoup
+from openpyxl import Workbook
 
-# ----------------------------
-# CONFIGURATION
-# ----------------------------
-INPUT_FILE = "scan_results.txt"
-OUTPUT_FILE = "books.xlsx"
+# ---------------------------
+# Command-line arguments
+# ---------------------------
+parser = argparse.ArgumentParser(description="Book Metadata Scanner")
 
-GOOGLE_BOOKS_API_KEY = ""
+parser.add_argument(
+    "--input", "-i",
+    default="input.txt",
+    help="Path to input TXT file (default: input.txt)"
+)
+parser.add_argument(
+    "--output", "-o",
+    default="books.xlsx",
+    help="Path to output Excel file (default: books.xlsx)"
+)
+parser.add_argument(
+    "--debug", "-d",
+    default="debug_log.txt",
+    help="Path to debug log file (default: debug_log.txt)"
+)
+parser.add_argument(
+    "--logdir", "-l",
+    default="logs_preview",
+    help="Directory to store HTML/JSON previews (default: logs_preview)"
+)
 
-DEBUG_FILE = "debug_log.txt"
-LOG_DIR = "logs_preview"  # directory to save html/json previews
+args = parser.parse_args()
 
-AMAZON_SITES = [
-    "https://www.amazon.it/s?k=",
-    "https://www.amazon.co.uk/s?k=",
-    "https://www.amazon.com/s?k="
-]
-
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                  "(KHTML, like Gecko) Chrome/85.0.4183.83 Safari/537.36"
-}
-
+INPUT_FILE = args.input
+OUTPUT_FILE = args.output
+DEBUG_FILE = args.debug
+LOG_DIR = args.logdir
 os.makedirs(LOG_DIR, exist_ok=True)
 
-# ----------------------------
-# HELPER FUNCTIONS
-# ----------------------------
+# ---------------------------
+# Read Google Books API Key
+# ---------------------------
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+API_KEY_FILE = os.path.join(SCRIPT_DIR, "google_api.txt")
+if os.path.exists(API_KEY_FILE):
+    with open(API_KEY_FILE, "r", encoding="utf-8") as f:
+        GOOGLE_BOOKS_API_KEY = f.read().strip()
+else:
+    print("Error: google_api.txt not found in script directory.")
+    GOOGLE_BOOKS_API_KEY = None
+
+# ---------------------------
+# Helpers
+# ---------------------------
 def is_isbn(text):
-    clean_text = text.replace("-", "").replace(" ", "")
-    return clean_text.isdigit() and len(clean_text) in (10, 13)
+    return re.fullmatch(r"\d{10}(\d{3})?", text.strip()) is not None
+
 
 def clean_ocr_text(text):
-    text = re.sub(r'\s+', ' ', text).strip()
-    if " - " in text:
-        title, author = text.split(" - ", 1)
-    elif "\n" in text:
-        parts = text.split("\n")
-        title = parts[0]
-        author = parts[1] if len(parts) > 1 else ""
-    else:
-        words = text.split(" ")
-        mid = len(words) // 2
-        title = " ".join(words[:mid])
-        author = " ".join(words[mid:])
-    return title.strip(), author.strip()
+    parts = text.split("-")
+    title = parts[0].strip() if len(parts) > 0 else None
+    author = parts[1].strip() if len(parts) > 1 else None
+    return title, author
 
-def safe_filename(text):
-    if is_isbn(text):
-        return text
-    else:
-        return hashlib.md5(text.encode("utf-8")).hexdigest()
 
-def save_preview(text, content):
-    filename = os.path.join(LOG_DIR, f"log_{safe_filename(text)}.txt")
-    with open(filename, "w", encoding="utf-8") as f:
-        f.write(content[:1000])
+def save_preview(line_num, source, raw_content):
+    path = os.path.join(LOG_DIR, f"log_{line_num}_{source}.txt")
+    with open(path, "w", encoding="utf-8") as f:
+        if isinstance(raw_content, (dict, list)):
+            import json
+            f.write(json.dumps(raw_content, indent=2, ensure_ascii=False))
+        else:
+            f.write(raw_content)
 
-def log_debug(line_num, source, query, result, error=None):
-    entry = {
-        "line": line_num,
-        "source": source,
-        "query": query,
-        "result": result,
-        "error": str(error) if error else None
-    }
+
+def log_debug(line_num, source, query, raw_content=None, error=None):
     with open(DEBUG_FILE, "a", encoding="utf-8") as f:
-        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        f.write(f"\nLine {line_num} | Source: {source}\n")
+        f.write(f"Query: {query}\n")
+        if error:
+            f.write(f"Error: {error}\n")
+        if raw_content:
+            preview_file = f"log_{line_num}_{source}.txt"
+            f.write(f"Preview saved: {preview_file}\n")
+    if raw_content:
+        save_preview(line_num, source, raw_content)
 
-# ----------------------------
-# METADATA SOURCES
-# ----------------------------
-def fetch_by_google_books(title=None, author=None, line_num=None, original_text=None, isbn=None):
-    query = f"isbn:{isbn}" if isbn else ""
-    if not isbn:
-        if title:
-            query += f"intitle:{title}"
-        if author:
-            query += f"+inauthor:{author}"
-    url = f"https://www.googleapis.com/books/v1/volumes?q={query}&key={GOOGLE_BOOKS_API_KEY}"
+
+# ---------------------------
+# Fetchers
+# ---------------------------
+def fetch_by_google_books(title=None, author=None, line_num=0, original_text=None, isbn=None):
+    if not GOOGLE_BOOKS_API_KEY:
+        log_debug(line_num, "GoogleBooks", "No API key", error="Missing Google API key")
+        return None
+
     try:
-        response = requests.get(url, timeout=10)
-        save_preview(original_text or query, response.text)
-        items = response.json().get("items", [])
-        result = None
-        if items:
-            info = items[0]["volumeInfo"]
-            result = {
+        if isbn:
+            url = f"https://www.googleapis.com/books/v1/volumes?q=isbn:{isbn}&key={GOOGLE_BOOKS_API_KEY}"
+        else:
+            q = []
+            if title:
+                q.append(f"intitle:{title}")
+            if author:
+                q.append(f"inauthor:{author}")
+            url = f"https://www.googleapis.com/books/v1/volumes?q={' '.join(q)}&key={GOOGLE_BOOKS_API_KEY}"
+
+        r = requests.get(url, timeout=10)
+        data = r.json()
+        log_debug(line_num, "GoogleBooks", url, data)
+
+        if "items" in data:
+            info = data["items"][0]["volumeInfo"]
+            return {
                 "title": info.get("title"),
                 "author": ", ".join(info.get("authors", [])) if info.get("authors") else None,
                 "publisher": info.get("publisher"),
@@ -104,52 +124,41 @@ def fetch_by_google_books(title=None, author=None, line_num=None, original_text=
                 "language": info.get("language") or "Unknown",
                 "source": "GoogleBooks"
             }
-        log_debug(line_num, "GoogleBooks", query, result)
-        return result
     except Exception as e:
-        log_debug(line_num, "GoogleBooks", query, None, error=e)
-        return None
+        log_debug(line_num, "GoogleBooks", original_text, error=e)
+    return None
 
-def fetch_by_openlibrary(title=None, author=None, line_num=None, original_text=None, isbn=None):
-    if isbn:
-        url = f"https://openlibrary.org/api/books?bibkeys=ISBN:{isbn}&format=json&jscmd=data"
-        try:
-            response = requests.get(url, timeout=10)
-            save_preview(original_text or isbn, response.text)
-            data = response.json()
-            if data:
-                info = next(iter(data.values()))
-                lang_list = [l['key'].split('/')[-1] for l in info.get("languages", [])] if info.get("languages") else []
-                result = {
-                    "title": info.get("title"),
-                    "author": ", ".join([a['name'] for a in info.get("authors", [])]) if info.get("authors") else None,
-                    "publisher": ", ".join(info.get("publishers", [])) if info.get("publishers") else None,
-                    "publishedDate": info.get("publish_date"),
+
+def fetch_by_openlibrary(title=None, author=None, line_num=0, original_text=None, isbn=None):
+    try:
+        if isbn:
+            url = f"https://openlibrary.org/isbn/{isbn}.json"
+            r = requests.get(url, timeout=10)
+            if r.status_code == 200:
+                data = r.json()
+                log_debug(line_num, "OpenLibraryISBN", url, data)
+                return {
+                    "title": data.get("title"),
+                    "author": ", ".join([a["name"] for a in data.get("authors", [])]) if data.get("authors") else None,
+                    "publisher": ", ".join(data.get("publishers", [])) if data.get("publishers") else None,
+                    "publishedDate": data.get("publish_date"),
                     "isbn": isbn,
-                    "language": ", ".join(lang_list) if lang_list else "Unknown",
+                    "language": ", ".join(data.get("languages", [])) if data.get("languages") else "Unknown",
                     "source": "OpenLibraryISBN"
                 }
-                log_debug(line_num, "OpenLibrary_ISBN", isbn, result)
-                return result
-            return None
-        except Exception as e:
-            log_debug(line_num, "OpenLibrary_ISBN", isbn, None, error=e)
-            return None
-    else:
-        query = ""
-        if title:
-            query += f"title={quote_plus(title)}"
-        if author:
-            query += f"&author={quote_plus(author)}"
-        url = f"https://openlibrary.org/search.json?{query}"
-        try:
-            response = requests.get(url, timeout=10)
-            save_preview(original_text or query, response.text)
-            docs = response.json().get("docs", [])
-            result = None
-            if docs:
-                doc = docs[0]
-                result = {
+        else:
+            q = []
+            if title:
+                q.append(f"title={title}")
+            if author:
+                q.append(f"author={author}")
+            url = f"https://openlibrary.org/search.json?{'&'.join(q)}"
+            r = requests.get(url, timeout=10)
+            data = r.json()
+            log_debug(line_num, "OpenLibrary", url, data)
+            if "docs" in data and len(data["docs"]) > 0:
+                doc = data["docs"][0]
+                return {
                     "title": doc.get("title"),
                     "author": ", ".join(doc.get("author_name", [])) if doc.get("author_name") else None,
                     "publisher": ", ".join(doc.get("publisher", [])) if doc.get("publisher") else None,
@@ -158,166 +167,135 @@ def fetch_by_openlibrary(title=None, author=None, line_num=None, original_text=N
                     "language": ", ".join(doc.get("language", [])) if doc.get("language") else "Unknown",
                     "source": "OpenLibrary"
                 }
-            log_debug(line_num, "OpenLibrary", query, result)
-            return result
-        except Exception as e:
-            log_debug(line_num, "OpenLibrary", query, None, error=e)
-            return None
+    except Exception as e:
+        log_debug(line_num, "OpenLibrary", original_text, error=e)
+    return None
 
-def fetch_by_opac_sbn(title=None, author=None, line_num=None, original_text=None):
-    query = f"{title} {author}" if title and author else title or author
-    url = f"https://opac.sbn.it/risultati-ricerca?f[title]={quote_plus(query)}"
+
+def fetch_by_opac_sbn(title=None, author=None, line_num=0, original_text=None):
     try:
-        response = requests.get(url, timeout=10)
-        save_preview(original_text or query, response.text)
-        soup = BeautifulSoup(response.text, "html.parser")
-        first_result = soup.select_one(".title a")
-        result = None
-        if first_result:
-            result = {
-                "title": first_result.text.strip(),
-                "author": "Unknown",
+        url = f"https://opac.sbn.it/opacsbn/opaclib?db=solr_iccu&select_db=solr_iccu&searchForm=opac/iccu/free.jsp&resultForward=opac/iccu/full.jsp&do_cmd=search_show_cmd&format=xml&from=1&nentries=1&searchType=perfree&fname=none&value={title or ''}+{author or ''}"
+        r = requests.get(url, timeout=10)
+        log_debug(line_num, "OPAC", url, r.text)
+        soup = BeautifulSoup(r.text, "html.parser")
+        result = soup.find("title")
+        if result:
+            return {
+                "title": result.text.strip(),
+                "author": author,
                 "publisher": "Unknown",
                 "publishedDate": "Unknown",
                 "isbn": None,
                 "language": "Unknown",
                 "source": "OPAC SBN"
             }
-        log_debug(line_num, "OPAC SBN", query, result)
-        return result
     except Exception as e:
-        log_debug(line_num, "OPAC SBN", query, None, error=e)
-        return None
-
-def fetch_from_amazon(text, line_num=None):
-    result = None
-    for site in AMAZON_SITES:
-        search_url = f"{site}{quote_plus(text)}"
-        try:
-            response = requests.get(search_url, headers=HEADERS, timeout=10)
-            save_preview(text, response.text)
-            soup = BeautifulSoup(response.text, "html.parser")
-            first_result = soup.select_one("h2 a.a-link-normal")
-            if not first_result:
-                log_debug(line_num, "Amazon_SearchHTML", search_url, {"error": "No first_result found"})
-                continue
-
-            title = first_result.text.strip()
-            book_url = "https://www.amazon.it" + first_result['href']
-            book_resp = requests.get(book_url, headers=HEADERS, timeout=10)
-            save_preview(text, book_resp.text)
-            book_soup = BeautifulSoup(book_resp.text, "html.parser")
-
-            author_tag = book_soup.select_one(".author a")
-            author = author_tag.text.strip() if author_tag else "Unknown"
-
-            publisher = "Unknown"
-            published_date = "Unknown"
-            isbn = None
-            detail_items = book_soup.select("#detailBullets_feature_div li")
-            for li in detail_items:
-                key = li.select_one("span.a-text-bold")
-                value = li.select_one("span.a-size-base")
-                if key and value:
-                    key_text = key.text.strip()
-                    value_text = value.text.strip()
-                    if "Publisher" in key_text:
-                        publisher = value_text
-                        year_match = re.search(r"\d{4}", publisher)
-                        if year_match:
-                            published_date = year_match.group(0)
-                    if "ISBN-13" in key_text:
-                        isbn_match = re.search(r"\d{10,13}", value_text)
-                        if isbn_match:
-                            isbn = isbn_match.group(0)
-
-            result = {
-                "title": title,
-                "author": author,
-                "publisher": publisher,
-                "publishedDate": published_date,
-                "isbn": isbn,
-                "language": "Unknown",
-                "source": "Amazon"
-            }
-            log_debug(line_num, "Amazon_Result", book_url, result)
-            return result
-        except Exception as e:
-            log_debug(line_num, "Amazon_Exception", search_url, None, error=e)
+        log_debug(line_num, "OPAC", original_text, error=e)
     return None
 
-# ----------------------------
-# MAIN SCRIPT
-# ----------------------------
-wb = openpyxl.Workbook()
-ws = wb.active
-ws.title = "Books"
-ws.append(["Title", "Author", "Publisher", "Publication Date", "ISBN", "Language", "Source"])
 
-open(DEBUG_FILE, "w").close()  # clear debug file
-
-with open(INPUT_FILE, "r", encoding="utf-8") as f:
-    lines = [line.strip() for line in f if line.strip()]
-
-total_lines = len(lines)
-start_time = time.time()
-
-for idx, line in enumerate(lines, 1):
+def fetch_from_amazon(query, line_num=0):
     try:
-        timestamp, data = line.split("\t", 1)
-    except ValueError:
-        print(f"[{idx}/{total_lines}] Skipping invalid line: {line}")
-        continue
+        url = f"https://www.amazon.it/s?k={query}"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        r = requests.get(url, headers=headers, timeout=10)
+        log_debug(line_num, "Amazon", url, r.text)
+        soup = BeautifulSoup(r.text, "html.parser")
 
-    is_isbn_flag = is_isbn(data)
-    data_type = "ISBN" if is_isbn_flag else "OCR Text"
+        title = None
+        author = None
 
-    elapsed = time.time() - start_time
-    avg_time = elapsed / idx
-    remaining_time = avg_time * (total_lines - idx)
-    eta = time.strftime("%H:%M:%S", time.gmtime(remaining_time))
+        title_tag = soup.select_one("h2 a span")
+        if title_tag:
+            title = title_tag.text.strip()
 
-    print(f"[{idx}/{total_lines}] Processing: '{data}' ({data_type}) | ETA: {eta}")
-    sys.stdout.flush()
+        author_tag = soup.select_one(".a-color-secondary .a-size-base")
+        if author_tag:
+            author = author_tag.text.strip()
 
-    title_guess, author_guess = clean_ocr_text(data)
+        return {
+            "title": title,
+            "author": author,
+            "publisher": None,
+            "publishedDate": None,
+            "isbn": None,
+            "language": "Unknown",
+            "source": "Amazon"
+        }
+    except Exception as e:
+        log_debug(line_num, "Amazon", query, error=e)
+    return None
 
-    # --------------------------
-    # Optimized search sequence
-    # --------------------------
-    book_info = None
-    if is_isbn_flag:
-        book_info = fetch_by_google_books(isbn=data, line_num=idx, original_text=data)
+
+# ---------------------------
+# Main
+# ---------------------------
+def main():
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Title", "Author", "Publisher", "Publication Date", "ISBN", "Language", "Source"])
+
+    with open(INPUT_FILE, "r", encoding="utf-8") as f:
+        lines = [line.strip() for line in f if line.strip()]
+
+    total_lines = len(lines)
+    start_time = time.time()
+
+    for idx, line in enumerate(lines, 1):
+        try:
+            timestamp, data = line.split("\t", 1)
+        except ValueError:
+            print(f"[{idx}/{total_lines}] Skipping invalid line: {line}")
+            continue
+
+        is_isbn_flag = is_isbn(data)
+        data_type = "ISBN" if is_isbn_flag else "OCR Text"
+
+        elapsed = time.time() - start_time
+        avg_time = elapsed / idx
+        remaining_time = avg_time * (total_lines - idx)
+        eta = time.strftime("%H:%M:%S", time.gmtime(remaining_time))
+
+        print(f"[{idx}/{total_lines}] Processing: '{data}' ({data_type}) | ETA: {eta}")
+        sys.stdout.flush()
+
+        title_guess, author_guess = clean_ocr_text(data)
+
+        book_info = None
+        if is_isbn_flag:
+            book_info = fetch_by_google_books(isbn=data, line_num=idx, original_text=data)
+            if not book_info:
+                book_info = fetch_by_openlibrary(isbn=data, line_num=idx, original_text=data)
+        else:
+            book_info = fetch_by_google_books(title=title_guess, author=author_guess, line_num=idx, original_text=data)
+            if not book_info:
+                book_info = fetch_by_openlibrary(title=title_guess, author=author_guess, line_num=idx, original_text=data)
+            if not book_info:
+                book_info = fetch_by_opac_sbn(title=title_guess, author=author_guess, line_num=idx, original_text=data)
+
         if not book_info:
-            book_info = fetch_by_openlibrary(isbn=data, line_num=idx, original_text=data)
-    else:
-        book_info = fetch_by_google_books(title=title_guess, author=author_guess, line_num=idx, original_text=data)
-        if not book_info:
-            book_info = fetch_by_openlibrary(title=title_guess, author=author_guess, line_num=idx, original_text=data)
-        if not book_info:
-            book_info = fetch_by_opac_sbn(title=title_guess, author=author_guess, line_num=idx, original_text=data)
+            book_info = fetch_from_amazon(data, line_num=idx)
 
-    # Only query Amazon sequentially if all above fail
-    if not book_info:
-        book_info = fetch_from_amazon(data, line_num=idx)
+        if book_info:
+            ws.append([
+                book_info.get("title") or "Unknown",
+                book_info.get("author") or "Unknown",
+                book_info.get("publisher") or "Unknown",
+                book_info.get("publishedDate") or "Unknown",
+                book_info.get("isbn") or "",
+                book_info.get("language") or "Unknown",
+                book_info.get("source") or ""
+            ])
+        else:
+            ws.append(["Unknown", "Unknown", "Unknown", "Unknown", "", "Unknown", "Not Found"])
 
-    # Append to Excel
-    if book_info:
-        ws.append([
-            book_info.get("title") or "Unknown",
-            book_info.get("author") or "Unknown",
-            book_info.get("publisher") or "Unknown",
-            book_info.get("publishedDate") or "Unknown",
-            book_info.get("isbn") or "",
-            book_info.get("language") or "Unknown",
-            book_info.get("source") or ""
-        ])
-    else:
-        ws.append(["Unknown", "Unknown", "Unknown", "Unknown", "", "Unknown", "Not Found"])
+        time.sleep(1)
 
-    time.sleep(1)
+    wb.save(OUTPUT_FILE)
+    print(f"\nExcel file saved as {OUTPUT_FILE}")
+    print(f"Debug log saved as {DEBUG_FILE}")
+    print(f"HTML/JSON previews saved in folder: {LOG_DIR}")
 
-wb.save(OUTPUT_FILE)
-print(f"\nExcel file saved as {OUTPUT_FILE}")
-print(f"Debug log saved as {DEBUG_FILE}")
-print(f"HTML/JSON previews saved in folder: {LOG_DIR}")
+
+if __name__ == "__main__":
+    main()
