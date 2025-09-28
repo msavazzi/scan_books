@@ -35,11 +35,21 @@ parser.add_argument(
 
 args = parser.parse_args()
 
+# Default paths
 INPUT_FILE = args.input
 OUTPUT_FILE = args.output
 DEBUG_FILE = args.debug
 LOG_DIR = args.logdir
 os.makedirs(LOG_DIR, exist_ok=True)
+
+# Print defaults if no options provided
+if len(sys.argv) == 1:
+    print("No command-line options provided. Using defaults:")
+    print(f"  Input file: {INPUT_FILE}")
+    print(f"  Output file: {OUTPUT_FILE}")
+    print(f"  Debug log: {DEBUG_FILE}")
+    print(f"  Logs directory: {LOG_DIR}")
+    print("\nStarting processing...\n")
 
 # ---------------------------
 # Read Google Books API Key
@@ -59,13 +69,11 @@ else:
 def is_isbn(text):
     return re.fullmatch(r"\d{10}(\d{3})?", text.strip()) is not None
 
-
 def clean_ocr_text(text):
     parts = text.split("-")
     title = parts[0].strip() if len(parts) > 0 else None
     author = parts[1].strip() if len(parts) > 1 else None
     return title, author
-
 
 def save_preview(line_num, source, raw_content):
     path = os.path.join(LOG_DIR, f"log_{line_num}_{source}.txt")
@@ -75,7 +83,6 @@ def save_preview(line_num, source, raw_content):
             f.write(json.dumps(raw_content, indent=2, ensure_ascii=False))
         else:
             f.write(raw_content)
-
 
 def log_debug(line_num, source, query, raw_content=None, error=None):
     with open(DEBUG_FILE, "a", encoding="utf-8") as f:
@@ -89,7 +96,6 @@ def log_debug(line_num, source, query, raw_content=None, error=None):
     if raw_content:
         save_preview(line_num, source, raw_content)
 
-
 # ---------------------------
 # Fetchers
 # ---------------------------
@@ -97,7 +103,6 @@ def fetch_by_google_books(title=None, author=None, line_num=0, original_text=Non
     if not GOOGLE_BOOKS_API_KEY:
         log_debug(line_num, "GoogleBooks", "No API key", error="Missing Google API key")
         return None
-
     try:
         if isbn:
             url = f"https://www.googleapis.com/books/v1/volumes?q=isbn:{isbn}&key={GOOGLE_BOOKS_API_KEY}"
@@ -127,7 +132,6 @@ def fetch_by_google_books(title=None, author=None, line_num=0, original_text=Non
     except Exception as e:
         log_debug(line_num, "GoogleBooks", original_text, error=e)
     return None
-
 
 def fetch_by_openlibrary(title=None, author=None, line_num=0, original_text=None, isbn=None):
     try:
@@ -171,7 +175,6 @@ def fetch_by_openlibrary(title=None, author=None, line_num=0, original_text=None
         log_debug(line_num, "OpenLibrary", original_text, error=e)
     return None
 
-
 def fetch_by_opac_sbn(title=None, author=None, line_num=0, original_text=None):
     try:
         url = f"https://opac.sbn.it/opacsbn/opaclib?db=solr_iccu&select_db=solr_iccu&searchForm=opac/iccu/free.jsp&resultForward=opac/iccu/full.jsp&do_cmd=search_show_cmd&format=xml&from=1&nentries=1&searchType=perfree&fname=none&value={title or ''}+{author or ''}"
@@ -192,7 +195,6 @@ def fetch_by_opac_sbn(title=None, author=None, line_num=0, original_text=None):
     except Exception as e:
         log_debug(line_num, "OPAC", original_text, error=e)
     return None
-
 
 def fetch_from_amazon(query, line_num=0):
     try:
@@ -225,7 +227,6 @@ def fetch_from_amazon(query, line_num=0):
     except Exception as e:
         log_debug(line_num, "Amazon", query, error=e)
     return None
-
 
 # ---------------------------
 # Main
@@ -263,39 +264,4 @@ def main():
 
         book_info = None
         if is_isbn_flag:
-            book_info = fetch_by_google_books(isbn=data, line_num=idx, original_text=data)
-            if not book_info:
-                book_info = fetch_by_openlibrary(isbn=data, line_num=idx, original_text=data)
-        else:
-            book_info = fetch_by_google_books(title=title_guess, author=author_guess, line_num=idx, original_text=data)
-            if not book_info:
-                book_info = fetch_by_openlibrary(title=title_guess, author=author_guess, line_num=idx, original_text=data)
-            if not book_info:
-                book_info = fetch_by_opac_sbn(title=title_guess, author=author_guess, line_num=idx, original_text=data)
-
-        if not book_info:
-            book_info = fetch_from_amazon(data, line_num=idx)
-
-        if book_info:
-            ws.append([
-                book_info.get("title") or "Unknown",
-                book_info.get("author") or "Unknown",
-                book_info.get("publisher") or "Unknown",
-                book_info.get("publishedDate") or "Unknown",
-                book_info.get("isbn") or "",
-                book_info.get("language") or "Unknown",
-                book_info.get("source") or ""
-            ])
-        else:
-            ws.append(["Unknown", "Unknown", "Unknown", "Unknown", "", "Unknown", "Not Found"])
-
-        time.sleep(1)
-
-    wb.save(OUTPUT_FILE)
-    print(f"\nExcel file saved as {OUTPUT_FILE}")
-    print(f"Debug log saved as {DEBUG_FILE}")
-    print(f"HTML/JSON previews saved in folder: {LOG_DIR}")
-
-
-if __name__ == "__main__":
-    main()
+            book_info = fetch_by_google_books

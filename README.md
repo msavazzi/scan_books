@@ -1,4 +1,3 @@
-
 # Book Metadata Scanner
 
 A Python script to scan a list of books (ISBN or OCR text from the front page) and retrieve detailed metadata including **Title, Author, Publisher, Publication Date, ISBN, Language, and Source**.  
@@ -24,6 +23,7 @@ It logs detailed debug information and saves HTML/JSON previews for every query.
 - Adds **book language** in the Excel output.  
 - Allows **custom input/output paths** via command line arguments.  
 - Reads **Google Books API key** from an external `google_api.txt` file.  
+- Prints default paths if no command-line options are provided.  
 
 ---
 
@@ -86,6 +86,18 @@ With defaults (input: `input.txt`, output: `books.xlsx`, debug log: `debug_log.t
 python scan_books.py
 ```
 
+If no command-line options are provided, the script prints the default paths:
+
+```
+No command-line options provided. Using defaults:
+  Input file: input.txt
+  Output file: books.xlsx
+  Debug log: debug_log.txt
+  Logs directory: logs_preview
+
+Starting processing...
+```
+
 With custom paths:
 
 ```bash
@@ -118,6 +130,7 @@ After completion you will get:
 - The script is **single-threaded** to reduce errors and avoid being blocked by Amazon.  
 - OCR text parsing is basic; results improve if the input text is clean.  
 - The **Google Books API key** must be placed in `google_api.txt` in the same directory as the script.  
+- Default paths are printed if no command-line options are provided.  
 
 ---
 
